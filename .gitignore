@@ -1,0 +1,11 @@
+# Folder dependensi
+node_modules/
+
+# File Environment (SANGAT RAHASIA)
+.env
+
+# File log
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

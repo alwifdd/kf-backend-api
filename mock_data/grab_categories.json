@@ -1,0 +1,28 @@
+{
+  "categories": [
+    {
+      "id": "HEALTH_MEDICINE",
+      "name": "Obat-obatan",
+      "subCategories": [
+        {
+          "id": "HEALTH_MEDICINE_PAIN",
+          "name": "Pereda Nyeri"
+        },
+        {
+          "id": "HEALTH_MEDICINE_FLU",
+          "name": "Flu & Batuk"
+        }
+      ]
+    },
+    {
+      "id": "PERSONAL_CARE",
+      "name": "Perawatan Diri",
+      "subCategories": [
+        {
+          "id": "PERSONAL_CARE_SKIN",
+          "name": "Perawatan Kulit"
+        }
+      ]
+    }
+  ]
+}
