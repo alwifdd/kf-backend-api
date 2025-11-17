@@ -35,7 +35,8 @@ export const getAllOrders = async (req, res) => {
     // 2. (BARU) Ambil data filter dari query string frontend
     const { filter_branch_id, filter_area_kota } = req.query;
 
-    let query = supabase.from("orders").select("*, branches(*)"); // (FIX) Ambil juga data 'branches'
+    // (FIX) Ambil juga data 'branches' terkait (untuk info nama apotek)
+    let query = supabase.from("orders").select("*, branches(*)");
 
     // 3. (BARU) Logika Filter Bertingkat
     if (role === "admin_cabang") {
@@ -122,10 +123,9 @@ export const getAllOrders = async (req, res) => {
       return res.status(403).json({ message: "Akses ditolak." });
     }
 
-    // (Logika Lama) Tambahkan filter status jika ada (dari frontend)
-    if (req.query.status) {
-      query = query.eq("status", req.query.status);
-    }
+    // (PENTING) Filter status 'req.query.status' dihapus dari sini.
+    // Kenapa? Karena frontend (DashboardPage) akan mengambil SEMUA status
+    // (sesuai filter cabang/BM) dan membaginya sendiri. Ini jauh lebih efisien.
 
     query = query.order("created_at", { ascending: false });
 
@@ -142,6 +142,7 @@ export const getAllOrders = async (req, res) => {
  * Membuat pesanan OFFLINE baru dan mengurangi stok. (Tidak Berubah)
  */
 export const createOrder = async (req, res) => {
+  // ... (kode ini tidak berubah)
   const { branch_id, items } = req.body;
 
   if (!branch_id || !items || !Array.isArray(items) || items.length === 0) {
@@ -221,6 +222,7 @@ export const createOrder = async (req, res) => {
  * Update status pesanan (internal). (Tidak Berubah)
  */
 export const updateOrderStatus = async (req, res) => {
+  // ... (kode ini tidak berubah)
   try {
     const { orderId } = req.params;
     const { status } = req.body;
@@ -262,13 +264,15 @@ export const updateOrderStatus = async (req, res) => {
 };
 
 /* --------------------------------------------------------------------------
- * 🔹 FUNGSI AKSI (Dipanggil dari POS, memanggil API Grab) (Tidak Berubah)
+ * 🔹 FUNGSI AKSI (Dipanggil dari POS, memanggil API Grab)
  * -------------------------------------------------------------------------- */
 
 /**
  * 1. TERIMA PESANAN (INCOMING -> PREPARING)
+ * (Tidak Berubah)
  */
 export const acceptOrder = async (req, res) => {
+  // ... (kode ini tidak berubah)
   const { orderId } = req.params; // Ini adalah grab_order_id
 
   try {
@@ -340,8 +344,10 @@ export const acceptOrder = async (req, res) => {
 
 /**
  * 2. TOLAK PESANAN (INCOMING -> REJECTED)
+ * (Tidak Berubah)
  */
 export const rejectOrder = async (req, res) => {
+  // ... (kode ini tidak berubah)
   const { orderId } = req.params;
   try {
     const { data: updatedOrder, error } = await supabase
@@ -361,25 +367,37 @@ export const rejectOrder = async (req, res) => {
 
 /**
  * 3. SIAPKAN PESANAN (PREPARING -> READY_FOR_PICKUP)
+ * (PERBAIKAN DI SINI)
  */
 export const markOrderAsReady = async (req, res) => {
   const { orderId } = req.params;
   try {
     console.log(`Mencoba menandai pesanan ${orderId} sebagai siap...`);
-    const requestBody = { orderID: orderId, markStatus: 1 };
-    const response = await fetch(
-      "http://localhost:8080/partner/v1/orders/mark",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      }
-    );
-    if (!response.ok) throw new Error("Panggilan ke mock server Grab gagal.");
+
+    // ==================================================================
+    // --- PERBAIKAN ---
+    // Kita komentari/nonaktifkan panggilan ke localhost:8080
+    // Server Vercel tidak bisa mengakses localhost di komputermu.
+
+    // const requestBody = { orderID: orderId, markStatus: 1 };
+    // const response = await fetch(
+    //   "http://localhost:8080/partner/v1/orders/mark",
+    //   {
+    //     method: "POST",
+    //     headers: { "Content-Type": "application/json" },
+    //     body: JSON.stringify(requestBody),
+    //   }
+    // );
+    // if (!response.ok) throw new Error("Panggilan ke mock server Grab gagal.");
+    // --- AKHIR PERBAIKAN ---
+    // ==================================================================
+
+    // Kita tetap jalankan update database-nya
     await supabase
       .from("orders")
       .update({ status: "READY_FOR_PICKUP" })
       .eq("grab_order_id", orderId);
+
     console.log(`Pesanan ${orderId} berhasil ditandai siap.`);
     res.status(200).json({ message: `Order ${orderId} marked as ready.` });
   } catch (error) {
@@ -390,17 +408,36 @@ export const markOrderAsReady = async (req, res) => {
 
 /**
  * 4. CEK PEMBATALAN
+ * (PERBAIKAN DI SINI)
  */
 export const checkCancellationEligibility = async (req, res) => {
   const { orderId } = req.params;
   try {
     console.log(`Mengecek apakah pesanan ${orderId} bisa dibatalkan...`);
-    const response = await fetch(
-      `http://localhost:8080/partner/v1/order/cancelable?orderID=${orderId}`
-    );
-    if (!response.ok) throw new Error("Panggilan ke mock server Grab gagal.");
-    const data = await response.json();
-    console.log(`Pesanan ${orderId} bisa dibatalkan.`);
+
+    // ==================================================================
+    // --- PERBAIKAN ---
+    // Kita komentari/nonaktifkan panggilan ke localhost:8080
+    // const response = await fetch(
+    //   `http://localhost:8080/partner/v1/order/cancelable?orderID=${orderId}`
+    // );
+    // if (!response.ok) throw new Error("Panggilan ke mock server Grab gagal.");
+    // const data = await response.json();
+    // --- AKHIR PERBAIKAN ---
+    // ==================================================================
+
+    // (BARU) Kita kirim data palsu/dummy seolah-olah dari Grab
+    // Ini agar tombol "Cancel" di frontend tetap bisa muncul
+    const data = {
+      cancelAble: true,
+      cancelReasons: [
+        { code: "1001", reason: "Items are unavailable" },
+        { code: "1002", reason: "I have too many orders now" },
+        { code: "1003", reason: "My shop is closed" },
+      ],
+    };
+
+    console.log(`Pesanan ${orderId} bisa dibatalkan (simulasi).`);
     res.status(200).json(data);
   } catch (error) {
     console.error("Gagal mengecek status pembatalan:", error);
@@ -410,6 +447,7 @@ export const checkCancellationEligibility = async (req, res) => {
 
 /**
  * 5. BATALKAN PESANAN (-> CANCELLED)
+ * (PERBAIKAN DI SINI)
  */
 export const cancelOrder = async (req, res) => {
   const { orderId } = req.params;
@@ -424,25 +462,29 @@ export const cancelOrder = async (req, res) => {
       `Mencoba membatalkan pesanan ${orderId} dengan alasan kode: ${cancelCode}`
     );
 
-    // 1. Panggil API Grab (Mock Server)
-    const requestBody = {
-      orderID: orderId,
-      merchantID: "GRAB_ID_SIMulasi",
-      cancelCode: cancelCode,
-    };
-    const response = await fetch(
-      "http://localhost:8080/partner/v1/order/cancel",
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      }
-    );
-    if (!response.ok) {
-      throw new Error("Panggilan pembatalan ke mock server Grab gagal.");
-    }
+    // ==================================================================
+    // --- PERBAIKAN ---
+    // 1. Panggil API Grab (Mock Server) - KITA NONAKTIFKAN
+    // const requestBody = {
+    //   orderID: orderId,
+    //   merchantID: "GRAB_ID_SIMulasi",
+    //   cancelCode: cancelCode,
+    // };
+    // const response = await fetch(
+    //   "http://localhost:8080/partner/v1/order/cancel",
+    //   {
+    //     method: "PUT",
+    //     headers: { "Content-Type": "application/json" },
+    //     body: JSON.stringify(requestBody),
+    //   }
+    // );
+    // if (!response.ok) {
+    //   throw new Error("Panggilan pembatalan ke mock server Grab gagal.");
+    // }
+    // --- AKHIR PERBAIKAN ---
+    // ==================================================================
 
-    // 2. Logika Restock
+    // 2. Logika Restock (Ini penting dan tetap dijalankan)
     const { data: orderData, error: orderError } = await supabase
       .from("orders")
       .select("id, branch_id, grab_payload_raw")
