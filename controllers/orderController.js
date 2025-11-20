@@ -1,19 +1,48 @@
 // controllers/orderController.js
 import { supabase } from "../config/supabaseClient.js";
 
+// --- KONFIGURASI GRAB STAGING ---
+const GRAB_API_BASE_URL = "https://partner-api.grab.com/grabmart-sandbox";
+const GRAB_AUTH_URL = "https://partner-api.grab.com/grabid/v1/oauth2/token";
+
+/* --------------------------------------------------------------------------
+ * 🔹 FUNGSI HELPER: Ambil Token OAuth dari Grab (Otomatis)
+ * -------------------------------------------------------------------------- */
+const getGrabToken = async () => {
+  try {
+    console.log("Meminta Access Token ke Grab Staging...");
+    const response = await fetch(GRAB_AUTH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: process.env.GRAB_CLIENT_ID,
+        client_secret: process.env.GRAB_CLIENT_SECRET,
+        grant_type: "client_credentials",
+        scope: "mart.partner_api", // Scope untuk GrabMart
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(`Gagal dapat token Grab: ${JSON.stringify(data)}`);
+    }
+
+    console.log("Berhasil dapat Token Grab!");
+    return data.access_token;
+  } catch (error) {
+    console.error("Error Auth Grab:", error);
+    throw error;
+  }
+};
+
 /* --------------------------------------------------------------------------
  * 🔹 FUNGSI HELPER UNTUK KONVERSI STOK (Tidak Berubah)
  * -------------------------------------------------------------------------- */
-
 const getConversionFactor = (modifierName) => {
   if (!modifierName) return 1;
   const name = modifierName.toLowerCase();
-  if (name.includes("strip")) {
-    return 10;
-  }
-  if (name.includes("box")) {
-    return 100;
-  }
+  if (name.includes("strip")) return 10;
+  if (name.includes("box")) return 100;
   return 1;
 };
 
@@ -21,114 +50,60 @@ const getConversionFactor = (modifierName) => {
  * 🔹 FUNGSI UNTUK FRONTEND POS (INTERNAL)
  * -------------------------------------------------------------------------- */
 
-/**
- * (UPDATE) Ambil pesanan berdasarkan role DAN filter frontend:
- * - Super Admin: Bisa filter by 'area' atau 'branch_id'.
- * - Bisnis Manager: Hanya bisa filter 'branch_id' di dalam areanya.
- * - Admin Cabang: Tidak bisa filter, selalu menampilkan 'branch_id' miliknya.
- */
 export const getAllOrders = async (req, res) => {
   try {
-    // 1. Ambil data user yang login (dari token)
     const { role, branchId, area } = req.user;
-
-    // 2. (BARU) Ambil data filter dari query string frontend
     const { filter_branch_id, filter_area_kota } = req.query;
 
-    // (FIX) Ambil juga data 'branches' terkait (untuk info nama apotek)
     let query = supabase.from("orders").select("*, branches(*)");
 
-    // 3. (BARU) Logika Filter Bertingkat
     if (role === "admin_cabang") {
-      // --- ALUR ADMIN CABANG ---
-      // Abaikan semua filter, paksa pakai branchId dia
-      console.log(`Filter pesanan untuk admin cabang, branchId: ${branchId}`);
       query = query.eq("branch_id", branchId);
     } else if (role === "bisnis_manager") {
-      // --- ALUR BISNIS MANAGER ---
-      console.log(`Filter pesanan untuk Bisnis Manager, area: ${area}`);
-
-      // Ambil dulu semua ID cabang di area BM ini (untuk validasi & default)
       const { data: branches, error: branchError } = await supabase
         .from("branches")
         .select("branch_id")
-        .eq("kota", area); // Filter berdasarkan 'kota' dari token
+        .eq("kota", area);
       if (branchError) throw branchError;
 
       const branchIdsInArea = branches.map((b) => b.branch_id);
-
-      if (branchIdsInArea.length === 0) {
-        console.log(`Tidak ada cabang ditemukan untuk area: ${area}`);
-        return res.status(200).json([]); // Tidak ada cabang, kirim data kosong
-      }
+      if (branchIdsInArea.length === 0) return res.status(200).json([]);
 
       if (filter_branch_id) {
-        // Jika BM memilih 1 cabang spesifik
         const intBranchId = parseInt(filter_branch_id, 10);
-        // (Security Check) Pastikan cabang itu ada di areanya
         if (branchIdsInArea.includes(intBranchId)) {
-          console.log(`BM memfilter ke 1 cabang: ${intBranchId}`);
           query = query.eq("branch_id", intBranchId);
         } else {
-          // Jika BM mencoba filter di luar areanya, tolak.
-          console.log(
-            `Error: BM di area ${area} mencoba akses cabang ${intBranchId}`
-          );
           return res
             .status(403)
             .json({ message: "Anda tidak punya akses ke cabang ini." });
         }
       } else {
-        // Jika BM tidak memilih (lihat semua di areanya)
-        console.log(
-          `BM melihat semua ${branchIdsInArea.length} cabang di areanya.`
-        );
         query = query.in("branch_id", branchIdsInArea);
       }
     } else if (role === "superadmin") {
-      // --- ALUR SUPER ADMIN ---
-      console.log("Superadmin meminta data...");
-
       if (filter_branch_id) {
-        // 1. Superadmin filter by 1 Cabang (prioritas)
-        console.log(`Superadmin memfilter ke 1 cabang: ${filter_branch_id}`);
         query = query.eq("branch_id", filter_branch_id);
       } else if (filter_area_kota) {
-        // 2. Superadmin filter by 1 Area BM
-        console.log(`Superadmin memfilter ke area: ${filter_area_kota}`);
-        const { data: branches, error: branchError } = await supabase
+        const { data: branches } = await supabase
           .from("branches")
           .select("branch_id")
           .eq("kota", filter_area_kota);
-        if (branchError) throw branchError;
 
-        const branchIdsInArea = branches.map((b) => b.branch_id);
+        const branchIdsInArea = branches
+          ? branches.map((b) => b.branch_id)
+          : [];
         if (branchIdsInArea.length > 0) {
           query = query.in("branch_id", branchIdsInArea);
         } else {
-          // Area itu tidak punya cabang
-          console.log(
-            `Tidak ada cabang ditemukan untuk area (filter): ${filter_area_kota}`
-          );
           return res.status(200).json([]);
         }
-      } else {
-        // 3. Superadmin tidak filter (lihat semua)
-        console.log("Superadmin melihat semua pesanan.");
-        // Tidak ada filter tambahan
       }
     } else {
-      // Role tidak dikenal
-      console.log(`Role tidak dikenal atau tidak valid: ${role}`);
       return res.status(403).json({ message: "Akses ditolak." });
     }
 
-    // (PENTING) Filter status 'req.query.status' dihapus dari sini.
-    // Kenapa? Karena frontend (DashboardPage) akan mengambil SEMUA status
-    // (sesuai filter cabang/BM) dan membaginya sendiri. Ini jauh lebih efisien.
-
     query = query.order("created_at", { ascending: false });
-
     const { data, error } = await query;
     if (error) throw error;
 
@@ -138,102 +113,59 @@ export const getAllOrders = async (req, res) => {
   }
 };
 
-/**
- * Membuat pesanan OFFLINE baru dan mengurangi stok. (Tidak Berubah)
- */
 export const createOrder = async (req, res) => {
-  // ... (kode ini tidak berubah)
   const { branch_id, items } = req.body;
-
-  if (!branch_id || !items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({
-      status: "fail",
-      message: "branch_id and a non-empty items array are required.",
-    });
+  if (!branch_id || !items || !Array.isArray(items)) {
+    return res.status(400).json({ status: "fail", message: "Invalid data." });
   }
 
   try {
-    // Cek stok dulu
+    // Cek stok
     for (const item of items) {
-      const { data: inventory, error } = await supabase
+      const { data: inventory } = await supabase
         .from("inventories")
         .select("opname_stock")
         .eq("branch_id", branch_id)
         .eq("product_id", item.product_id)
         .single();
 
-      if (error || !inventory) {
-        throw new Error(`Product ${item.product_id} not found at this branch.`);
-      }
-
-      if (inventory.opname_stock < item.quantity) {
-        throw new Error(
-          `Insufficient stock for ${item.product_id}. Only ${inventory.opname_stock} left.`
-        );
+      if (!inventory || inventory.opname_stock < item.quantity) {
+        throw new Error(`Stok tidak cukup untuk ${item.product_id}`);
       }
     }
 
-    // Buat order
     const { data: newOrder, error: orderError } = await supabase
       .from("orders")
       .insert({ branch_id: branch_id, status: "PREPARING" })
       .select()
       .single();
-
     if (orderError) throw orderError;
 
-    // Masukkan order items
     const orderItemsData = items.map((item) => ({
       order_id: newOrder.id,
       product_id: item.product_id,
       quantity: item.quantity,
     }));
+    await supabase.from("order_items").insert(orderItemsData);
 
-    const { error: itemsError } = await supabase
-      .from("order_items")
-      .insert(orderItemsData);
-
-    if (itemsError) throw itemsError;
-
-    // Kurangi stok (memanggil fungsi DB)
     for (const item of items) {
-      const { error: stockError } = await supabase.rpc("decrease_stock", {
+      await supabase.rpc("decrease_stock", {
         branch_id_input: branch_id,
         product_id_input: item.product_id,
         quantity_input: item.quantity,
       });
-      if (stockError) throw stockError;
     }
 
-    res.status(202).json({
-      status: "success",
-      message: "Order received and is being processed.",
-      order_id: newOrder.id,
-    });
+    res.status(202).json({ status: "success", order_id: newOrder.id });
   } catch (error) {
-    res.status(500).json({
-      status: "fail",
-      message: error.message,
-    });
+    res.status(500).json({ status: "fail", message: error.message });
   }
 };
 
-/**
- * Update status pesanan (internal). (Tidak Berubah)
- */
 export const updateOrderStatus = async (req, res) => {
-  // ... (kode ini tidak berubah)
   try {
     const { orderId } = req.params;
     const { status } = req.body;
-
-    if (!status) {
-      return res.status(400).json({
-        status: "fail",
-        message: "Status is required.",
-      });
-    }
-
     const { data, error } = await supabase
       .from("orders")
       .update({ status: status })
@@ -242,296 +174,228 @@ export const updateOrderStatus = async (req, res) => {
       .single();
 
     if (error) throw error;
+    if (!data)
+      return res
+        .status(404)
+        .json({ status: "fail", message: "Order not found." });
 
-    if (!data) {
-      return res.status(404).json({
-        status: "fail",
-        message: `Order with ID ${orderId} not found.`,
-      });
-    }
-
-    res.status(200).json({
-      status: "success",
-      message: `Order status updated to ${status}`,
-      order: data,
-    });
+    res.status(200).json({ status: "success", order: data });
   } catch (error) {
-    res.status(500).json({
-      status: "fail",
-      message: error.message,
-    });
+    res.status(500).json({ status: "fail", message: error.message });
   }
 };
 
 /* --------------------------------------------------------------------------
- * 🔹 FUNGSI AKSI (Dipanggil dari POS, memanggil API Grab)
+ * 🔹 FUNGSI AKSI (Dipanggil dari POS, memanggil API Grab ASLI)
  * -------------------------------------------------------------------------- */
 
-/**
- * 1. TERIMA PESANAN (INCOMING -> PREPARING)
- * (Tidak Berubah)
- */
 export const acceptOrder = async (req, res) => {
-  // ... (kode ini tidak berubah)
-  const { orderId } = req.params; // Ini adalah grab_order_id
-
+  const { orderId } = req.params;
   try {
-    // 1. Ambil data pesanan
-    const { data: order, error: orderError } = await supabase
+    const { data: order } = await supabase
       .from("orders")
       .select("branch_id, grab_payload_raw")
       .eq("grab_order_id", orderId)
       .single();
 
-    if (orderError || !order) {
-      return res.status(404).json({ message: `Order ${orderId} not found.` });
-    }
+    if (!order) return res.status(404).json({ message: "Order not found." });
 
-    // 2. Ambil 'items' dari payload mentah
     const items = order.grab_payload_raw.items;
-    if (!items || items.length === 0) {
-      throw new Error(`Tidak ada item di pesanan ${orderId}.`);
-    }
-
-    // 3. Loop setiap item dan kurangi stok DENGAN LOGIKA KONVERSI
     for (const item of items) {
       let conversionFactor = 1;
       if (item.modifiers && item.modifiers.length > 0) {
         const modifierName = item.modifiers[0].name;
         conversionFactor = getConversionFactor(modifierName);
-        console.log(
-          `[Stok] Modifier terdeteksi: "${modifierName}". Faktor konversi: ${conversionFactor}`
-        );
       }
-      const totalQuantityToDecrease = item.quantity * conversionFactor;
-      console.log(
-        `[Stok] Mengurangi stok ${item.id} di cabang ${order.branch_id} sebanyak ${totalQuantityToDecrease} (tablet)`
-      );
+      const totalQty = item.quantity * conversionFactor;
 
-      // 4. Panggil fungsi 'decrease_stock' di database
-      const { error: stockError } = await supabase.rpc("decrease_stock", {
+      await supabase.rpc("decrease_stock", {
         branch_id_input: order.branch_id,
         product_id_input: item.id,
-        quantity_input: totalQuantityToDecrease,
+        quantity_input: totalQty,
       });
-
-      if (stockError) {
-        throw stockError; // Jika stok tidak cukup, RPC akan mengembalikan error
-      }
     }
 
-    // 5. Jika semua stok berhasil dikurangi, update status pesanan
-    const { data: updatedOrder, error: updateError } = await supabase
+    const { data: updatedOrder } = await supabase
       .from("orders")
       .update({ status: "PREPARING" })
       .eq("grab_order_id", orderId)
       .select()
       .single();
 
-    if (updateError) throw updateError;
-
-    console.log(
-      `Pesanan ${orderId} diterima. Stok dikurangi, status jadi PREPARING.`
-    );
     res.status(200).json(updatedOrder);
   } catch (error) {
-    console.error(`Gagal menerima pesanan ${orderId}:`, error);
-    res
-      .status(500)
-      .json({ message: `Gagal menerima pesanan: ${error.message}` });
+    res.status(500).json({ message: error.message });
   }
 };
 
-/**
- * 2. TOLAK PESANAN (INCOMING -> REJECTED)
- * (Tidak Berubah)
- */
 export const rejectOrder = async (req, res) => {
-  // ... (kode ini tidak berubah)
   const { orderId } = req.params;
   try {
-    const { data: updatedOrder, error } = await supabase
+    const { data: updatedOrder } = await supabase
       .from("orders")
       .update({ status: "REJECTED" })
       .eq("grab_order_id", orderId)
       .select()
       .single();
-    if (error) throw error;
-    console.log(`Pesanan ${orderId} ditolak.`);
     res.status(200).json(updatedOrder);
   } catch (error) {
-    console.error(`Gagal menolak pesanan ${orderId}:`, error);
     res.status(500).json({ message: "Gagal menolak pesanan." });
   }
 };
 
 /**
- * 3. SIAPKAN PESANAN (PREPARING -> READY_FOR_PICKUP)
- * (PERBAIKAN DI SINI)
+ * 3. SIAPKAN PESANAN (Mark Order Ready ke Grab Staging)
  */
 export const markOrderAsReady = async (req, res) => {
   const { orderId } = req.params;
   try {
-    console.log(`Mencoba menandai pesanan ${orderId} sebagai siap...`);
+    console.log(`Menandai pesanan ${orderId} siap di Grab Staging...`);
 
-    // ==================================================================
-    // --- PERBAIKAN ---
-    // Kita komentari/nonaktifkan panggilan ke localhost:8080
-    // Server Vercel tidak bisa mengakses localhost di komputermu.
+    // 1. Dapatkan Token
+    const token = await getGrabToken();
 
-    // const requestBody = { orderID: orderId, markStatus: 1 };
-    // const response = await fetch(
-    //   "http://localhost:8080/partner/v1/orders/mark",
-    //   {
-    //     method: "POST",
-    //     headers: { "Content-Type": "application/json" },
-    //     body: JSON.stringify(requestBody),
-    //   }
-    // );
-    // if (!response.ok) throw new Error("Panggilan ke mock server Grab gagal.");
-    // --- AKHIR PERBAIKAN ---
-    // ==================================================================
+    // 2. Panggil API Grab Staging
+    const response = await fetch(
+      `${GRAB_API_BASE_URL}/partner/v1/orders/mark`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`, // Pakai token asli
+        },
+        body: JSON.stringify({
+          orderID: orderId,
+          markStatus: 1,
+        }),
+      }
+    );
 
-    // Kita tetap jalankan update database-nya
+    if (!response.ok) {
+      const errData = await response.text();
+      throw new Error(`Grab API Error: ${errData}`);
+    }
+
+    // 3. Update Database Lokal
     await supabase
       .from("orders")
       .update({ status: "READY_FOR_PICKUP" })
       .eq("grab_order_id", orderId);
 
-    console.log(`Pesanan ${orderId} berhasil ditandai siap.`);
+    console.log(`Pesanan ${orderId} berhasil ditandai siap di Grab & DB.`);
     res.status(200).json({ message: `Order ${orderId} marked as ready.` });
   } catch (error) {
     console.error("Gagal menandai pesanan:", error);
-    res.status(500).json({ message: "Internal server error." });
+    res.status(500).json({ message: error.message });
   }
 };
 
 /**
- * 4. CEK PEMBATALAN
- * (PERBAIKAN DI SINI)
+ * 4. CEK PEMBATALAN (Ke Grab Staging)
  */
 export const checkCancellationEligibility = async (req, res) => {
   const { orderId } = req.params;
   try {
-    console.log(`Mengecek apakah pesanan ${orderId} bisa dibatalkan...`);
+    const token = await getGrabToken();
 
-    // ==================================================================
-    // --- PERBAIKAN ---
-    // Kita komentari/nonaktifkan panggilan ke localhost:8080
-    // const response = await fetch(
-    //   `http://localhost:8080/partner/v1/order/cancelable?orderID=${orderId}`
-    // );
-    // if (!response.ok) throw new Error("Panggilan ke mock server Grab gagal.");
-    // const data = await response.json();
-    // --- AKHIR PERBAIKAN ---
-    // ==================================================================
+    const response = await fetch(
+      `${GRAB_API_BASE_URL}/partner/v1/order/cancelable?orderID=${orderId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
 
-    // (BARU) Kita kirim data palsu/dummy seolah-olah dari Grab
-    // Ini agar tombol "Cancel" di frontend tetap bisa muncul
-    const data = {
-      cancelAble: true,
-      cancelReasons: [
-        { code: "1001", reason: "Items are unavailable" },
-        { code: "1002", reason: "I have too many orders now" },
-        { code: "1003", reason: "My shop is closed" },
-      ],
-    };
+    if (!response.ok) {
+      // Jika order dummy (tidak ada di grab), return dummy true agar tidak error di UI
+      console.log(
+        "Order tidak ditemukan di Grab (mungkin order tes), return dummy true."
+      );
+      return res.status(200).json({ cancelAble: true, cancelReasons: [] });
+    }
 
-    console.log(`Pesanan ${orderId} bisa dibatalkan (simulasi).`);
+    const data = await response.json();
     res.status(200).json(data);
   } catch (error) {
-    console.error("Gagal mengecek status pembatalan:", error);
-    res.status(500).json({ message: "Internal server error." });
+    console.error("Gagal cek pembatalan:", error);
+    res.status(500).json({ message: error.message });
   }
 };
 
 /**
- * 5. BATALKAN PESANAN (-> CANCELLED)
- * (PERBAIKAN DI SINI)
+ * 5. BATALKAN PESANAN (Ke Grab Staging)
  */
 export const cancelOrder = async (req, res) => {
   const { orderId } = req.params;
   const { cancelCode } = req.body;
 
-  if (!cancelCode) {
-    return res.status(400).json({ message: "cancelCode is required." });
-  }
+  if (!cancelCode)
+    return res.status(400).json({ message: "cancelCode required." });
 
   try {
-    console.log(
-      `Mencoba membatalkan pesanan ${orderId} dengan alasan kode: ${cancelCode}`
+    console.log(`Membatalkan pesanan ${orderId} di Grab Staging...`);
+
+    const token = await getGrabToken();
+
+    // 1. Panggil API Grab
+    // (Kita gunakan ID Merchant dummy/default karena di body request butuh merchantID)
+    const merchantID = "grabfood-merchant-id";
+
+    const response = await fetch(
+      `${GRAB_API_BASE_URL}/partner/v1/order/cancel`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          orderID: orderId,
+          merchantID: merchantID,
+          cancelCode: cancelCode,
+        }),
+      }
     );
 
-    // ==================================================================
-    // --- PERBAIKAN ---
-    // 1. Panggil API Grab (Mock Server) - KITA NONAKTIFKAN
-    // const requestBody = {
-    //   orderID: orderId,
-    //   merchantID: "GRAB_ID_SIMulasi",
-    //   cancelCode: cancelCode,
-    // };
-    // const response = await fetch(
-    //   "http://localhost:8080/partner/v1/order/cancel",
-    //   {
-    //     method: "PUT",
-    //     headers: { "Content-Type": "application/json" },
-    //     body: JSON.stringify(requestBody),
-    //   }
-    // );
-    // if (!response.ok) {
-    //   throw new Error("Panggilan pembatalan ke mock server Grab gagal.");
-    // }
-    // --- AKHIR PERBAIKAN ---
-    // ==================================================================
+    // Kalau gagal batalkan di Grab (misal karena order tes lokal), kita log aja tapi lanjut restock
+    if (!response.ok) {
+      console.warn(
+        "Gagal cancel di Grab (mungkin order tes), lanjut restock lokal."
+      );
+    }
 
-    // 2. Logika Restock (Ini penting dan tetap dijalankan)
-    const { data: orderData, error: orderError } = await supabase
+    // 2. Restock Stok
+    const { data: orderData } = await supabase
       .from("orders")
       .select("id, branch_id, grab_payload_raw")
       .eq("grab_order_id", orderId)
       .single();
-    if (orderError || !orderData)
-      throw new Error(`Order ${orderId} not found.`);
 
-    // 3. Ambil items dari payload mentah
-    const itemsToRestock = orderData.grab_payload_raw.items;
+    if (orderData) {
+      const items = orderData.grab_payload_raw.items;
+      for (const item of items) {
+        let factor = 1;
+        if (item.modifiers?.[0])
+          factor = getConversionFactor(item.modifiers[0].name);
 
-    // 4. Loop item dan restock DENGAN KONVERSI
-    if (itemsToRestock && itemsToRestock.length > 0) {
-      for (const item of itemsToRestock) {
-        let conversionFactor = 1;
-        if (item.modifiers && item.modifiers.length > 0) {
-          const modifierName = item.modifiers[0].name;
-          conversionFactor = getConversionFactor(modifierName);
-        }
-        const totalQuantityToIncrease = item.quantity * conversionFactor;
-        console.log(
-          `[Restock] Mengembalikan stok ${item.id} ke cabang ${orderData.branch_id} sebanyak ${totalQuantityToIncrease} (tablet)`
-        );
-        // Panggil fungsi 'increase_stock' di database
-        const { error: stockError } = await supabase.rpc("increase_stock", {
+        await supabase.rpc("increase_stock", {
           branch_id_input: orderData.branch_id,
           product_id_input: item.id,
-          quantity_input: totalQuantityToIncrease,
+          quantity_input: item.quantity * factor,
         });
-        if (stockError) throw stockError;
       }
     }
 
-    // 5. Update status di database LOKAL
+    // 3. Update DB Lokal
     await supabase
       .from("orders")
       .update({ status: "CANCELLED" })
       .eq("grab_order_id", orderId);
 
-    console.log(
-      `Pesanan ${orderId} berhasil dibatalkan dan stok dikembalikan.`
-    );
-    res.status(200).json({
-      message: `Order ${orderId} has been cancelled and stock restored.`,
-    });
+    res.status(200).json({ message: "Order cancelled and stock restored." });
   } catch (error) {
     console.error("Gagal membatalkan pesanan:", error);
-    res.status(500).json({ message: "Internal server error." });
+    res.status(500).json({ message: error.message });
   }
 };

@@ -7,7 +7,7 @@ dotenv.config();
 
 // --- PAYLOAD JSON UNTUK SIGNATURE ---
 const payloadString = `{
-  "orderID": "ORDER-AMBON-ANTIMO-004",
+  "orderID": "ORDER-AMBON-ANTIMO-006",
   "state": "DELIVERED"
 }`;
 // --------------------------------------------------
