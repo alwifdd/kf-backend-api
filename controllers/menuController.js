@@ -7,6 +7,8 @@ import { supabase } from "../config/supabaseClient.js";
 export const getMartMenu = async (req, res) => {
   const { partnerMerchantID, merchantID } = req.query;
 
+  console.log(`[Menu] Permintaan menu untuk PartnerID: ${partnerMerchantID}`);
+
   if (!partnerMerchantID) {
     return res
       .status(400)
@@ -48,36 +50,41 @@ export const getMartMenu = async (req, res) => {
       `
       )
       .eq("branch_id", internalBranchId);
+
     if (productsError) throw productsError;
+
+    console.log(`[Menu] Ditemukan ${productsData.length} produk di database.`);
 
     const productIds = productsData.map((p) => p.products.product_id);
 
-    const { data: modifierGroupsData, error: mgError } = await supabase
+    // Ambil data modifier (jika ada)
+    const { data: modifierGroupsData } = await supabase
       .from("modifier_groups")
       .select(`*`)
       .in("product_id", productIds);
-    if (mgError) throw mgError;
 
-    const modifierGroupIds = modifierGroupsData.map((mg) => mg.id);
+    const modifierGroupIds = modifierGroupsData
+      ? modifierGroupsData.map((mg) => mg.id)
+      : [];
 
-    const { data: modifiersData, error: mError } = await supabase
+    const { data: modifiersData } = await supabase
       .from("modifiers")
       .select(`*`)
       .in("modifier_group_id", modifierGroupIds);
-    if (mError) throw mError;
 
-    // ⬇️ --- PERBAIKANNYA DI SINI ---
+    // Ambil Selling Times (Jam Buka)
     const { data: sellingTimesData, error: stError } = await supabase
       .from("selling_times")
-      .select(`*`) // <-- Ini yang ditambahkan
+      .select(`*`)
       .eq("partner_merchant_id", internalBranchId);
-    if (stError) throw stError;
-    // ⬆️ --- AKHIR DARI PERBAIKAN ---
 
-    const modifiersByGroupId = modifiersData.reduce((acc, modifier) => {
-      if (!acc[modifier.modifier_group_id]) {
+    if (stError) throw stError;
+
+    // --- LOGIKA PENYUSUNAN MENU ---
+
+    const modifiersByGroupId = (modifiersData || []).reduce((acc, modifier) => {
+      if (!acc[modifier.modifier_group_id])
         acc[modifier.modifier_group_id] = [];
-      }
       acc[modifier.modifier_group_id].push({
         id: modifier.id,
         name: modifier.name,
@@ -87,11 +94,9 @@ export const getMartMenu = async (req, res) => {
       return acc;
     }, {});
 
-    const modifierGroupsByProductId = modifierGroupsData.reduce(
+    const modifierGroupsByProductId = (modifierGroupsData || []).reduce(
       (acc, group) => {
-        if (!acc[group.product_id]) {
-          acc[group.product_id] = [];
-        }
+        if (!acc[group.product_id]) acc[group.product_id] = [];
         acc[group.product_id].push({
           id: group.id,
           name: group.name,
@@ -111,20 +116,22 @@ export const getMartMenu = async (req, res) => {
       price: p.products.price,
       availableStatus: p.opname_stock > 0 ? "AVAILABLE" : "UNAVAILABLE",
       maxStock: p.opname_stock,
-      sellingTimeID: p.products.selling_time_id,
-      _grab_category_id: p.products.grab_category_id,
-      _grab_subcategory_id: p.products.grab_subcategory_id,
+      sellingTimeID: p.products.selling_time_id, // Pastikan ini tidak null di DB
+      _grab_category_id: p.products.grab_category_id || "CAT-DEFAULT",
+      _grab_subcategory_id: p.products.grab_subcategory_id || "SUB-DEFAULT",
       modifierGroups: modifierGroupsByProductId[p.products.product_id] || [],
+      photos: [], // Grab kadang butuh array photos walau kosong
     }));
 
+    // --- FORMAT 1: CATEGORIES (Untuk GrabMart / New Structure) ---
     const categoriesMap = items.reduce((acc, item) => {
-      const catId = item._grab_category_id || "uncategorized";
-      const subCatId = item._grab_subcategory_id || "uncategorized";
+      const catId = item._grab_category_id;
+      const subCatId = item._grab_subcategory_id;
 
       if (!acc[catId]) {
         acc[catId] = {
           id: catId,
-          name: "Nama Kategori dari Grab",
+          name: catId === "HEALTH_MEDICINE" ? "Obat-obatan" : "Umum", // Nama cantik
           subCategoriesMap: {},
         };
       }
@@ -132,15 +139,17 @@ export const getMartMenu = async (req, res) => {
       if (!acc[catId].subCategoriesMap[subCatId]) {
         acc[catId].subCategoriesMap[subCatId] = {
           id: subCatId,
-          name: "Nama Subkategori dari Grab",
+          name: subCatId === "SUB-DEFAULT" ? "Lainnya" : subCatId,
           items: [],
         };
       }
 
-      delete item._grab_category_id;
-      delete item._grab_subcategory_id;
+      // Bersihkan property internal sebelum masuk ke array items
+      const cleanItem = { ...item };
+      delete cleanItem._grab_category_id;
+      delete cleanItem._grab_subcategory_id;
 
-      acc[catId].subCategoriesMap[subCatId].items.push(item);
+      acc[catId].subCategoriesMap[subCatId].items.push(cleanItem);
       return acc;
     }, {});
 
@@ -150,12 +159,35 @@ export const getMartMenu = async (req, res) => {
       subCategoriesMap: undefined,
     }));
 
-    const sellingTimes = sellingTimesData.map((st) => ({
+    // --- FORMAT 2: SECTIONS (Untuk GrabFood / Old Structure) ---
+    // Kita "gepengkan" kategori -> section.
+    // Semua item dalam satu kategori akan masuk ke satu section.
+    const sections = Object.values(categoriesMap).map((cat) => {
+      // Gabungkan semua item dari semua subkategori
+      const allItemsInSection = Object.values(cat.subCategoriesMap).flatMap(
+        (sub) => sub.items
+      );
+
+      // Cari ID Selling Time pertama yang valid untuk section ini
+      const defaultSellingTime = sellingTimesData[0]?.id;
+
+      return {
+        id: cat.id,
+        name: cat.name,
+        serviceHours: {
+          // GrabFood butuh serviceHours di level section
+          // Kita pakai ID dari selling_times kita
+          id: defaultSellingTime,
+        },
+        items: allItemsInSection,
+      };
+    });
+
+    const sellingTimes = (sellingTimesData || []).map((st) => ({
       id: st.id,
       name: st.name,
       serviceHours: st.service_hours,
-      startTime: st.utc_start_time,
-      endTime: st.utc_end_time,
+      // Hapus utc_start/end time jika bikin bingung Grab, tapi biasanya aman
     }));
 
     const finalMenuPayload = {
@@ -163,9 +195,13 @@ export const getMartMenu = async (req, res) => {
       partnerMerchantID,
       currency: { code: "IDR", symbol: "Rp", exponent: 2 },
       sellingTimes,
-      categories,
+      categories, // Format Baru
+      sections, // Format Lama (Ini yang diminta Grab sekarang)
     };
 
+    console.log(
+      `[Menu] Menu berhasil disusun. Mengirim ${sections.length} sections.`
+    );
     res.status(200).json(finalMenuPayload);
   } catch (error) {
     console.error(
@@ -194,18 +230,26 @@ export const updateSingleItem = async (req, res) => {
 
   try {
     if (price !== undefined) {
-      await supabase
+      const { error: updateProductError } = await supabase
         .from("products")
         .update({ price })
         .eq("product_id", itemId);
+
+      if (updateProductError) {
+        throw updateProductError;
+      }
     }
 
     if (maxStock !== undefined) {
-      await supabase
+      const { error: updateInventoryError } = await supabase
         .from("inventories")
         .update({ opname_stock: maxStock })
         .eq("product_id", itemId)
         .eq("branch_id", branchId);
+
+      if (updateInventoryError) {
+        throw updateInventoryError;
+      }
     }
 
     const requestBodyToGrab = {
@@ -228,8 +272,9 @@ export const updateSingleItem = async (req, res) => {
       body: JSON.stringify(requestBodyToGrab),
     });
 
-    if (!response.ok)
+    if (!response.ok) {
       throw new Error("Panggilan update ke mock server Grab gagal.");
+    }
 
     res.status(200).json({ message: `Item ${itemId} updated successfully.` });
   } catch (error) {
@@ -288,18 +333,22 @@ export const batchUpdateItems = async (req, res) => {
 
     for (const item of items) {
       if (item.price !== undefined) {
-        await supabase
+        const { error: updateProductError } = await supabase
           .from("products")
           .update({ price: item.price })
           .eq("product_id", item.product_id);
+
+        if (updateProductError) throw updateProductError;
       }
 
       if (item.maxStock !== undefined) {
-        await supabase
+        const { error: updateInventoryError } = await supabase
           .from("inventories")
           .update({ opname_stock: item.maxStock })
           .eq("product_id", item.product_id)
           .eq("branch_id", branchId);
+
+        if (updateInventoryError) throw updateInventoryError;
       }
     }
 
