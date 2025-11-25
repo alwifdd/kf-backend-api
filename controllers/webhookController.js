@@ -32,13 +32,15 @@ export const handleSubmitOrder = async (req, res) => {
 
   try {
     console.log(
-      `[Webhook] Menerima pesanan baru dengan ID: ${grabOrderPayload.orderID}`
+      `[Webhook] Menerima pesanan dengan Grab orderID: ${grabOrderPayload.orderID}`
     );
 
     const { orderID, partnerMerchantID, items, scheduledTime } =
       grabOrderPayload;
 
-    // ✅ LANGKAH 1: Terjemahkan ID Grab -> ID Internal
+    // ==============================================================
+    // STEP 1 — Terjemahkan Grab Merchant ID → Internal Branch ID
+    // ==============================================================
     const { data: branch, error: branchError } = await supabase
       .from("branches")
       .select("branch_id")
@@ -51,28 +53,70 @@ export const handleSubmitOrder = async (req, res) => {
       );
     }
 
-    // ✅ LANGKAH 2: Gunakan ID Internal
     const internalBranchId = branch.branch_id;
 
-    // ✅ LANGKAH 3: Simpan pesanan ke tabel orders
-    const { data: newOrder, error: orderError } = await supabase
+    // ==============================================================
+    // STEP 2 — CEK apakah order sudah ada (Handle Edit / Duplicate)
+    // ==============================================================
+    const { data: existingOrder } = await supabase
       .from("orders")
-      .insert({
-        branch_id: internalBranchId,
-        status: "INCOMING",
-        grab_order_id: orderID,
-        grab_payload_raw: grabOrderPayload,
-        scheduled_time: scheduledTime || null,
-      })
       .select("id")
+      .eq("grab_order_id", orderID)
       .single();
 
-    if (orderError) throw orderError;
+    let finalInternalOrderId;
 
-    // ✅ LANGKAH 4: Simpan item pesanan
+    if (existingOrder) {
+      // ============================================================
+      // UPDATE — ORDER SUDAH ADA → ini kemungkinan Edit Order
+      // ============================================================
+      console.log(`[Webhook] Order ${orderID} sudah ada → UPDATE order.`);
+
+      await supabase
+        .from("orders")
+        .update({
+          status: "INCOMING", // Reset supaya kasir memproses ulang
+          grab_payload_raw: grabOrderPayload,
+          scheduled_time: scheduledTime || null,
+          updated_at: new Date(),
+        })
+        .eq("id", existingOrder.id);
+
+      // Hapus item lama (Grab bisa ubah item saat edit order)
+      await supabase
+        .from("order_items")
+        .delete()
+        .eq("order_id", existingOrder.id);
+
+      finalInternalOrderId = existingOrder.id;
+    } else {
+      // ============================================================
+      // INSERT — ORDER BARU
+      // ============================================================
+      console.log(`[Webhook] Order ${orderID} baru → INSERT order.`);
+
+      const { data: newOrder, error: orderInsertError } = await supabase
+        .from("orders")
+        .insert({
+          branch_id: internalBranchId,
+          status: "INCOMING",
+          grab_order_id: orderID,
+          grab_payload_raw: grabOrderPayload,
+          scheduled_time: scheduledTime || null,
+        })
+        .select("id")
+        .single();
+
+      if (orderInsertError) throw orderInsertError;
+      finalInternalOrderId = newOrder.id;
+    }
+
+    // ==============================================================
+    // STEP 3 — INSERT ITEM PESANAN BARU
+    // ==============================================================
     if (items && items.length > 0) {
       const orderItemsData = items.map((item) => ({
-        order_id: newOrder.id,
+        order_id: finalInternalOrderId,
         product_id: item.id,
         quantity: item.quantity,
       }));
@@ -85,11 +129,11 @@ export const handleSubmitOrder = async (req, res) => {
     }
 
     console.log(
-      `[Webhook] Pesanan ${orderID} (untuk cabang internal ${internalBranchId}) berhasil disimpan.`
+      `[Webhook] Pesanan ${orderID} berhasil diproses (order internal: ${finalInternalOrderId}).`
     );
   } catch (error) {
     console.error(
-      `[Webhook] GAGAL memproses pesanan ${grabOrderPayload.orderID}:`,
+      `[Webhook] GAGAL memproses pesanan ${req.body?.orderID}:`,
       error
     );
   }
