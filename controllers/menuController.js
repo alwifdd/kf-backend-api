@@ -14,36 +14,41 @@ export const getMartMenu = async (req, res) => {
       .eq("grab_merchant_id", partnerMerchantID)
       .single();
 
-    if (!branch) {
-      return res.status(404).json({ message: "Branch not found" });
-    }
-
-    const internalBranchId = branch.branch_id;
-    const branchName = branch.branch_name || "Apotek Kimia Farma";
+    // Fallback jika branch tidak ketemu (untuk testing)
+    const internalBranchId = branch ? branch.branch_id : null;
+    const branchName = branch ? branch.branch_name : "Apotek Kimia Farma";
 
     // 2. Ambil Data Produk (Inventory)
-    const { data: productsData } = await supabase
-      .from("inventories")
-      .select(
+    let productsData = [];
+    if (internalBranchId) {
+      const { data } = await supabase
+        .from("inventories")
+        .select(
+          `
+            opname_stock,
+            products (
+            product_id, product_name, price, description,
+            grab_category_id, grab_subcategory_id
+            )
         `
-        opname_stock,
-        products (
-          product_id, product_name, price, description,
-          grab_category_id, grab_subcategory_id
         )
-      `
-      )
-      .eq("branch_id", internalBranchId);
+        .eq("branch_id", internalBranchId);
+      productsData = data || [];
+    }
 
     // 3. Ambil Selling Times dari DB
-    const { data: dbSellingTimes } = await supabase
-      .from("selling_times")
-      .select("*")
-      .eq("partner_merchant_id", String(internalBranchId));
+    let dbSellingTimes = [];
+    if (internalBranchId) {
+      const { data } = await supabase
+        .from("selling_times")
+        .select("*")
+        .eq("partner_merchant_id", String(internalBranchId));
+      dbSellingTimes = data || [];
+    }
 
-    // --- LOGIKA MAPPING DATA ---
+    // --- LOGIKA MAPPING & FIXING DATA ---
 
-    // A. Selling Times (Wajib Ada)
+    // A. FIX SELLING TIMES (Wajib Ada)
     // Jika di DB kosong, kita buat Default 24 Jam agar Grab tidak error
     let finalSellingTimes = [];
     if (dbSellingTimes && dbSellingTimes.length > 0) {
@@ -53,6 +58,7 @@ export const getMartMenu = async (req, res) => {
         serviceHours: st.service_hours,
       }));
     } else {
+      // DATA DUMMY JIKA DB KOSONG
       finalSellingTimes = [
         {
           id: "ST-DEFAULT",
@@ -73,26 +79,24 @@ export const getMartMenu = async (req, res) => {
     // Ambil ID selling time pertama untuk dipakai di Section
     const sectionSellingTimeID = finalSellingTimes[0].id;
 
-    // B. Items Mapping
+    // B. FIX ITEMS MAPPING
     // Jika produk kosong, buat 1 dummy agar tidak error 'Empty Section'
     let items = [];
     if (productsData && productsData.length > 0) {
       items = productsData.map((p) => ({
         id: String(p.products.product_id),
-        name: p.products.product_name || "Item",
-        description: p.products.description || "",
+        name: p.products.product_name || "Item Tanpa Nama",
+        description: p.products.description || "Deskripsi obat",
         price: Math.floor(Number(p.products.price) || 0),
         availableStatus: p.opname_stock > 0 ? "AVAILABLE" : "UNAVAILABLE",
         maxStock: Math.floor(Number(p.opname_stock) || 0),
         photos: [],
-        // Internal fields
         _cat: p.products.grab_category_id || "CAT-OBAT",
         _sub: p.products.grab_subcategory_id || "SUB-LAINNYA",
-        // Gunakan selling time default utk item
-        sellingTimeID: sectionSellingTimeID,
+        sellingTimeID: sectionSellingTimeID, // Link ke selling time
       }));
     } else {
-      // Dummy Item jika stok kosong
+      // DATA DUMMY JIKA STOK KOSONG
       items = [
         {
           id: "DUMMY-01",
@@ -109,7 +113,7 @@ export const getMartMenu = async (req, res) => {
       ];
     }
 
-    // C. Grouping Categories
+    // C. GROUPING CATEGORIES
     const categoriesMap = items.reduce((acc, item) => {
       const catId = item._cat;
       const subId = item._sub;
@@ -138,13 +142,13 @@ export const getMartMenu = async (req, res) => {
       })),
     }));
 
-    // --- BAGIAN TERPENTING: BUNGKUS KE SECTIONS ---
+    // --- STEP FINAL: BUNGKUS KE SECTIONS (WAJIB UTK GRAB OLD STRUCTURE) ---
     const sections = [
       {
         id: "SEC-MAIN",
         name: branchName,
         serviceHours: { id: sectionSellingTimeID },
-        categories: categories, // Array categories masuk di sini!
+        categories: categories, // Masukkan categories ke dalam sini
       },
     ];
 
@@ -153,8 +157,8 @@ export const getMartMenu = async (req, res) => {
       merchantID,
       partnerMerchantID,
       currency: { code: "IDR", symbol: "Rp", exponent: 2 },
-      sellingTimes: finalSellingTimes,
-      sections: sections, // <-- GRAB WAJIB MELIHAT KEY INI
+      sellingTimes: finalSellingTimes, // Sekarang pasti terisi
+      sections: sections, // Sekarang pasti ada
     };
 
     res.status(200).json(finalPayload);
