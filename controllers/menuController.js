@@ -19,7 +19,7 @@ export const getMartMenu = async (req, res) => {
     // 1. Ambil Data Branch
     const { data: branch, error: branchError } = await supabase
       .from("branches")
-      .select("branch_id")
+      .select("branch_id, branch_name") // Ambil branch_name juga untuk nama Section
       .eq("grab_merchant_id", partnerMerchantID)
       .single();
 
@@ -30,6 +30,7 @@ export const getMartMenu = async (req, res) => {
     }
 
     const internalBranchId = branch.branch_id;
+    const branchName = branch.branch_name || "General Section";
 
     // 2. Ambil Data Produk (Inventory)
     const { data: productsData, error: productsError } = await supabase
@@ -63,6 +64,7 @@ export const getMartMenu = async (req, res) => {
     // 3. Ambil Data Pendukung (Modifier & Selling Times)
     const productIds = productsData.map((p) => p.products.product_id);
 
+    // Ambil Modifier Groups
     const { data: modifierGroupsData } = await supabase
       .from("modifier_groups")
       .select(`*`)
@@ -72,35 +74,43 @@ export const getMartMenu = async (req, res) => {
       ? modifierGroupsData.map((mg) => mg.id)
       : [];
 
+    // Ambil Modifiers
     const { data: modifiersData } = await supabase
       .from("modifiers")
       .select(`*`)
       .in("modifier_group_id", modifierGroupIds);
 
+    // Ambil Selling Times
     const { data: sellingTimesData, error: stError } = await supabase
       .from("selling_times")
       .select(`*`)
-      .eq("partner_merchant_id", internalBranchId);
+      .eq("partner_merchant_id", String(internalBranchId)); // Pastikan tipe data cocok
 
     if (stError) throw stError;
 
-    // --- PENYUSUNAN ITEM ---
+    // --- 4. PENYUSUNAN DATA (MAPPING) ---
 
+    // Helper: Map Modifiers by Group ID
     const modifiersByGroupId = (modifiersData || []).reduce((acc, modifier) => {
       if (!acc[modifier.modifier_group_id])
         acc[modifier.modifier_group_id] = [];
+
       acc[modifier.modifier_group_id].push({
         id: modifier.id,
         name: modifier.name,
         price: modifier.price,
         availableStatus: modifier.available_status,
+        // Grab kadang butuh barcode/SKU di modifier juga, opsional:
+        // barcode: modifier.id
       });
       return acc;
     }, {});
 
+    // Helper: Map Modifier Groups by Product ID
     const modifierGroupsByProductId = (modifierGroupsData || []).reduce(
       (acc, group) => {
         if (!acc[group.product_id]) acc[group.product_id] = [];
+
         acc[group.product_id].push({
           id: group.id,
           name: group.name,
@@ -113,33 +123,39 @@ export const getMartMenu = async (req, res) => {
       {}
     );
 
+    // Helper: Construct Items
     const items = productsData.map((p) => ({
       id: p.products.product_id,
       name: p.products.product_name,
-      description: p.products.description || "", // Deskripsi tidak boleh null/undefined
+      description: p.products.description || "",
       price: p.products.price,
+      // Logika Stok Kimia Farma: Jika opname_stock > 0, maka AVAILABLE
       availableStatus: p.opname_stock > 0 ? "AVAILABLE" : "UNAVAILABLE",
       maxStock: p.opname_stock,
-      // Penting: Simpan properti ini untuk pengelompokan nanti
+
+      // Field internal untuk grouping (tidak dikirim ke Grab)
       _grab_category_id: p.products.grab_category_id || "CAT-DEFAULT",
       _grab_subcategory_id: p.products.grab_subcategory_id || "SUB-DEFAULT",
+
       modifierGroups: modifierGroupsByProductId[p.products.product_id] || [],
-      photos: [],
+      photos: [], // Isi URL foto jika ada di database
     }));
 
-    // --- MENYUSUN KATEGORI (STRUCTURE) ---
+    // --- 5. MENYUSUN KATEGORI (Grouping) ---
     const categoriesMap = items.reduce((acc, item) => {
       const catId = item._grab_category_id;
       const subCatId = item._grab_subcategory_id;
 
+      // Buat Kategori jika belum ada
       if (!acc[catId]) {
         acc[catId] = {
           id: catId,
-          name: catId === "HEALTH_MEDICINE" ? "Obat-obatan" : "Umum",
+          name: catId === "CAT-OBAT" ? "Obat-obatan" : catId, // Mapping nama cantik bisa diperluas
           subCategoriesMap: {},
         };
       }
 
+      // Buat Sub-Kategori jika belum ada
       if (!acc[catId].subCategoriesMap[subCatId]) {
         acc[catId].subCategoriesMap[subCatId] = {
           id: subCatId,
@@ -148,65 +164,61 @@ export const getMartMenu = async (req, res) => {
         };
       }
 
-      // Clone item agar _grab_category_id tidak ikut terkirim di JSON akhir
+      // Bersihkan properti internal sebelum push ke items
       const { _grab_category_id, _grab_subcategory_id, ...cleanItem } = item;
       acc[catId].subCategoriesMap[subCatId].items.push(cleanItem);
+
       return acc;
     }, {});
 
+    // Konversi Map ke Array 'categories' sesuai standar Grab
     const categories = Object.values(categoriesMap).map((cat) => ({
-      ...cat,
-      subCategories: Object.values(cat.subCategoriesMap),
-      subCategoriesMap: undefined, // Hapus helper property
+      id: cat.id,
+      name: cat.name,
+      subCategories: Object.values(cat.subCategoriesMap).map((sub) => ({
+        id: sub.id,
+        name: sub.name,
+        items: sub.items,
+      })),
     }));
 
-    // --- FORMAT LAMA (SECTIONS) ---
-    // GrabFood lama (bukan Mart) pakai 'sections' bukan 'categories'
-    // Kita konversi Categories -> Sections
-    const sections = Object.values(categoriesMap).map((cat) => {
-      const allItemsInSection = Object.values(cat.subCategoriesMap).flatMap(
-        (sub) => sub.items
-      );
-
-      // Ambil sellingTimeID dari item pertama, atau default dari DB
-      const sectionSellingTimeID =
-        allItemsInSection[0]?.sellingTimeID || sellingTimesData[0]?.id;
-
-      return {
-        id: cat.id,
-        name: cat.name,
-        serviceHours: {
-          id: sectionSellingTimeID,
-        },
-        categories: Object.values(cat.subCategoriesMap).map((sub) => ({
-          id: sub.id,
-          name: sub.name,
-          items: sub.items,
-        })),
-      };
-    });
-
-    // Format Selling Times (Jam Buka)
+    // --- 6. FORMAT SELLING TIMES ---
     const sellingTimes = sellingTimesData.map((st) => ({
       id: st.id,
       name: st.name,
-      serviceHours: st.service_hours,
+      serviceHours: st.service_hours, // Pastikan format JSONB di DB sudah sesuai spek Grab
     }));
 
-    // --- PAYLOAD FINAL ---
+    // --- 7. MENYUSUN STRUCTURE FINAL (SECTION BASED) ---
+    // Karena setting di Grab Portal adalah "Old Structure (Section Based)",
+    // Kita harus membungkus 'categories' ke dalam 'sections'.
+
+    // Ambil ID selling time default (jika ada), atau gunakan fallback string
+    const defaultSellingTimeID = sellingTimes[0]?.id || "ST-DEFAULT";
+
+    const sections = [
+      {
+        id: "SEC-MAIN",
+        name: branchName, // Nama section bisa pakai nama toko
+        serviceHours: {
+          id: defaultSellingTimeID,
+        },
+        categories: categories, // Masukkan array categories yang sudah dibuat di atas
+      },
+    ];
+
+    // --- 8. PAYLOAD FINAL ---
     const finalMenuPayload = {
       merchantID,
       partnerMerchantID,
       currency: { code: "IDR", symbol: "Rp", exponent: 2 },
       sellingTimes,
-      categories, // Kirim format baru
-      // sections,   // <-- SEMENTARA KITA MATIKAN DULU AGAR TIDAK BENTROK
+      // categories, // ❌ JANGAN kirim ini di root level untuk Section Based
+      sections, // ✅ Kirim ini karena settingan Grab kamu "Old Structure"
     };
 
-    // Log payload untuk debugging di Vercel Logs
-    console.log(
-      `[Menu] Mengirim menu ke Grab: ${JSON.stringify(finalMenuPayload)}`
-    );
+    // Log payload untuk debugging (Opsional, matikan di production jika terlalu besar)
+    // console.log(`[Menu] Mengirim menu ke Grab: ${JSON.stringify(finalMenuPayload)}`);
 
     res.status(200).json(finalMenuPayload);
   } catch (error) {
