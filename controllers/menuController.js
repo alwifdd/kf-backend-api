@@ -7,7 +7,7 @@ export const getMartMenu = async (req, res) => {
   console.log(`[Menu] Request masuk. PartnerID: ${partnerMerchantID}`);
 
   try {
-    // 1. Cari Branch ID Internal (Misal: KFA1 -> 40003)
+    // 1. Cari Branch ID Internal (Misal: KFA_FINAL -> 40003)
     const { data: branch } = await supabase
       .from("branches")
       .select("branch_id, branch_name")
@@ -49,7 +49,6 @@ export const getMartMenu = async (req, res) => {
     // --- LOGIKA MAPPING & FIXING DATA ---
 
     // A. FIX SELLING TIMES (Wajib Ada)
-    // Jika di DB kosong, kita buat Default 24 Jam agar Grab tidak error
     let finalSellingTimes = [];
     if (dbSellingTimes && dbSellingTimes.length > 0) {
       finalSellingTimes = dbSellingTimes.map((st) => ({
@@ -58,7 +57,7 @@ export const getMartMenu = async (req, res) => {
         serviceHours: st.service_hours,
       }));
     } else {
-      // DATA DUMMY JIKA DB KOSONG
+      // Default 24 Jam
       finalSellingTimes = [
         {
           id: "ST-DEFAULT",
@@ -76,38 +75,43 @@ export const getMartMenu = async (req, res) => {
       ];
     }
 
-    // Ambil ID selling time pertama untuk dipakai di Section
     const sectionSellingTimeID = finalSellingTimes[0].id;
 
-    // B. FIX ITEMS MAPPING
-    // Jika produk kosong, buat 1 dummy agar tidak error 'Empty Section'
+    // B. FIX ITEMS MAPPING (HARGA * 100)
     let items = [];
     if (productsData && productsData.length > 0) {
       items = productsData.map((p) => ({
         id: String(p.products.product_id),
         name: p.products.product_name || "Item Tanpa Nama",
         description: p.products.description || "Deskripsi obat",
-        price: Math.floor(Number(p.products.price) || 0),
+
+        // 👇👇 PERBAIKAN UTAMA DI SINI 👇👇
+        // Harga DB dikali 100 agar Grab membacanya sebagai Rupiah penuh
+        price: Math.floor((Number(p.products.price) || 0) * 100),
+
         availableStatus: p.opname_stock > 0 ? "AVAILABLE" : "UNAVAILABLE",
         maxStock: Math.floor(Number(p.opname_stock) || 0),
         photos: [],
-        _cat: p.products.grab_category_id || "CAT-OBAT",
-        _sub: p.products.grab_subcategory_id || "SUB-LAINNYA",
-        sellingTimeID: sectionSellingTimeID, // Link ke selling time
+
+        // Default Kategori Resmi Grab
+        _cat: p.products.grab_category_id || "IDITEDP20220629083236010281",
+        _sub: p.products.grab_subcategory_id || "IDITEDP20220701092521017633",
+
+        sellingTimeID: sectionSellingTimeID,
       }));
     } else {
-      // DATA DUMMY JIKA STOK KOSONG
+      // DUMMY ITEM
       items = [
         {
           id: "DUMMY-01",
           name: "Paracetamol (Stok Habis)",
           description: "Item dummy",
-          price: 500000,
+          price: 500000, // Rp 5.000 (5000 * 100)
           availableStatus: "AVAILABLE",
           maxStock: 100,
           photos: [],
-          _cat: "CAT-OBAT",
-          _sub: "SUB-OBAT-BEBAS",
+          _cat: "IDITEDP20220629083236010281",
+          _sub: "IDITEDP20220701092521017633",
           sellingTimeID: sectionSellingTimeID,
         },
       ];
@@ -142,13 +146,13 @@ export const getMartMenu = async (req, res) => {
       })),
     }));
 
-    // --- STEP FINAL: BUNGKUS KE SECTIONS (WAJIB UTK GRAB OLD STRUCTURE) ---
+    // --- STEP FINAL: BUNGKUS KE SECTIONS ---
     const sections = [
       {
         id: "SEC-MAIN",
         name: branchName,
         serviceHours: { id: sectionSellingTimeID },
-        categories: categories, // Masukkan categories ke dalam sini
+        categories: categories,
       },
     ];
 
@@ -157,8 +161,8 @@ export const getMartMenu = async (req, res) => {
       merchantID,
       partnerMerchantID,
       currency: { code: "IDR", symbol: "Rp", exponent: 2 },
-      sellingTimes: finalSellingTimes, // Sekarang pasti terisi
-      sections: sections, // Sekarang pasti ada
+      sellingTimes: finalSellingTimes,
+      sections: sections,
     };
 
     res.status(200).json(finalPayload);
