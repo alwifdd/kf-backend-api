@@ -3,17 +3,16 @@ import { supabase } from "../config/supabaseClient.js";
 import { integrationStatusSchema } from "../validators/integrationStatusValidator.js";
 import { menuSyncStateSchema } from "../validators/menuSyncValidator.js";
 
-// --- Helper Functions for Background Processing ---
+// --- Helper Functions ---
 const processIntegrationStatus = async (statusData) => {
   console.log(
-    `[Background Process] Received Integration Status for store ${statusData.storeID}`
+    `[Background] Integration Status: ${statusData.status} for ${statusData.storeID}`
   );
-  console.log(`[Background Process] New Status: ${statusData.status}`);
 };
 
 const processPushedMenu = async (menuData) => {
   console.log(
-    `[Background Process] Received a menu push from Grab for partner ID: ${menuData.partnerID}.`
+    `[Background] Menu Push received for partner: ${menuData.partnerID}`
   );
 };
 
@@ -23,24 +22,18 @@ const processPushedMenu = async (menuData) => {
  * Menerima pesanan baru dari Grab (Submit Order webhook)
  */
 export const handleSubmitOrder = async (req, res) => {
-  // 1. Kirim respons cepat ke Grab agar tidak timeout
-  res
-    .status(202)
-    .json({ message: "Order webhook received and is being processed." });
+  // 1. Kirim respons cepat agar Grab tidak timeout
+  res.status(200).json({ message: "Order received" });
 
   const grabOrderPayload = req.body;
+  const { orderID, partnerMerchantID, items, scheduledTime } = grabOrderPayload;
+
+  console.log(
+    `[Webhook] Memproses Order: ${orderID} (Merchant: ${partnerMerchantID})`
+  );
 
   try {
-    console.log(
-      `[Webhook] Menerima pesanan dengan Grab orderID: ${grabOrderPayload.orderID}`
-    );
-
-    const { orderID, partnerMerchantID, items, scheduledTime } =
-      grabOrderPayload;
-
-    // ==============================================================
-    // STEP 1 — Terjemahkan Grab Merchant ID → Internal Branch ID
-    // ==============================================================
+    // ✅ LANGKAH 1: Cari Branch ID Internal
     const { data: branch, error: branchError } = await supabase
       .from("branches")
       .select("branch_id")
@@ -48,54 +41,41 @@ export const handleSubmitOrder = async (req, res) => {
       .single();
 
     if (branchError || !branch) {
-      throw new Error(
-        `[Webhook] GAGAL: Cabang dengan grab_merchant_id ${partnerMerchantID} tidak ditemukan.`
-      );
+      throw new Error(`Cabang tidak ditemukan untuk ID: ${partnerMerchantID}`);
     }
 
     const internalBranchId = branch.branch_id;
 
-    // ==============================================================
-    // STEP 2 — CEK apakah order sudah ada (Handle Edit / Duplicate)
-    // ==============================================================
+    // ✅ LANGKAH 2: Cek apakah order sudah ada (Upsert Logic)
     const { data: existingOrder } = await supabase
       .from("orders")
       .select("id")
       .eq("grab_order_id", orderID)
       .single();
 
-    let finalInternalOrderId;
+    let orderInternalID;
 
     if (existingOrder) {
-      // ============================================================
-      // UPDATE — ORDER SUDAH ADA → ini kemungkinan Edit Order
-      // ============================================================
-      console.log(`[Webhook] Order ${orderID} sudah ada → UPDATE order.`);
-
+      console.log(`[Webhook] Order ${orderID} sudah ada. Melakukan UPDATE.`);
+      // Update status dan payload
       await supabase
         .from("orders")
         .update({
-          status: "INCOMING", // Reset supaya kasir memproses ulang
+          status: "INCOMING",
           grab_payload_raw: grabOrderPayload,
-          scheduled_time: scheduledTime || null,
           updated_at: new Date(),
         })
         .eq("id", existingOrder.id);
 
-      // Hapus item lama (Grab bisa ubah item saat edit order)
+      // Hapus item lama untuk diganti yang baru
       await supabase
         .from("order_items")
         .delete()
         .eq("order_id", existingOrder.id);
-
-      finalInternalOrderId = existingOrder.id;
+      orderInternalID = existingOrder.id;
     } else {
-      // ============================================================
-      // INSERT — ORDER BARU
-      // ============================================================
-      console.log(`[Webhook] Order ${orderID} baru → INSERT order.`);
-
-      const { data: newOrder, error: orderInsertError } = await supabase
+      console.log(`[Webhook] Order ${orderID} baru. Melakukan INSERT.`);
+      const { data: newOrder, error: orderError } = await supabase
         .from("orders")
         .insert({
           branch_id: internalBranchId,
@@ -107,18 +87,20 @@ export const handleSubmitOrder = async (req, res) => {
         .select("id")
         .single();
 
-      if (orderInsertError) throw orderInsertError;
-      finalInternalOrderId = newOrder.id;
+      if (orderError) throw orderError;
+      orderInternalID = newOrder.id;
     }
 
-    // ==============================================================
-    // STEP 3 — INSERT ITEM PESANAN BARU
-    // ==============================================================
+    // ✅ LANGKAH 3: Simpan Item Pesanan (CRITICAL FIX)
     if (items && items.length > 0) {
       const orderItemsData = items.map((item) => ({
-        order_id: finalInternalOrderId,
-        product_id: item.id,
+        order_id: orderInternalID,
+        // Pastikan ID diambil dari 'id' (yang kita kirim di menuController)
+        product_id: item.id || "UNKNOWN_ITEM",
         quantity: item.quantity,
+        // Kita simpan harga snapshot saat order masuk (opsional, buat history)
+        // Grab kirim harga total per item line (price * qty), jadi hati-hati
+        // Tapi untuk POS display, kita pakai data dari grab_payload_raw di Frontend
       }));
 
       const { error: itemsError } = await supabase
@@ -128,14 +110,9 @@ export const handleSubmitOrder = async (req, res) => {
       if (itemsError) throw itemsError;
     }
 
-    console.log(
-      `[Webhook] Pesanan ${orderID} berhasil diproses (order internal: ${finalInternalOrderId}).`
-    );
+    console.log(`[Webhook] SUKSES! Order ${orderID} tersimpan di database.`);
   } catch (error) {
-    console.error(
-      `[Webhook] GAGAL memproses pesanan ${req.body?.orderID}:`,
-      error
-    );
+    console.error(`[Webhook] GAGAL memproses pesanan ${orderID}:`, error);
   }
 };
 
@@ -145,91 +122,56 @@ export const handleSubmitOrder = async (req, res) => {
 export const receiveOrderStatus = async (req, res) => {
   const { orderID, state } = req.body;
 
-  if (!orderID || !state) {
-    return res.status(400).json({ message: "orderID and state are required." });
-  }
+  // Response cepat
+  res.status(200).json({ message: "Status update received" });
+
+  if (!orderID || !state) return;
 
   try {
-    const { data, error } = await supabase
+    console.log(`[Webhook] Update Status Order ${orderID} -> ${state}`);
+
+    // Mapping status Grab ke status Internal jika perlu
+    // Contoh: CANCELLED -> CANCELLED, COMPLETED -> DELIVERED
+    const { error } = await supabase
       .from("orders")
       .update({ status: state })
-      .eq("grab_order_id", orderID)
-      .select()
-      .single();
+      .eq("grab_order_id", orderID);
 
     if (error) throw error;
-
-    if (!data) {
-      return res
-        .status(404)
-        .json({ message: `Order with Grab ID ${orderID} not found.` });
-    }
-
-    console.log(`Order ${orderID} status updated to ${state} by Grab webhook.`);
-    res.status(200).json({ message: "Webhook received successfully." });
   } catch (error) {
     console.error("Error processing status update:", error);
-    res.status(500).json({ message: "Internal server error." });
   }
 };
 
-/**
- * Menerima status integrasi toko dari Grab
- */
+// --- Handler Lainnya (Biarkan Saja) ---
 export const handleIntegrationStatus = (req, res) => {
   const validationResult = integrationStatusSchema.safeParse(req.body);
-  if (!validationResult.success) {
-    return res
-      .status(400)
-      .json({ status: "fail", errors: validationResult.error.issues });
-  }
-
-  res.status(202).json({ message: "Webhook received." });
+  if (!validationResult.success)
+    return res.status(400).json({ status: "fail" });
+  res.status(200).json({ message: "Webhook received." });
   void processIntegrationStatus(validationResult.data);
 };
 
-/**
- * Menerima data menu lengkap dari Grab saat onboarding
- */
 export const handlePushMenu = (req, res) => {
-  if (!req.body || Object.keys(req.body).length === 0) {
-    return res
-      .status(400)
-      .json({ status: "fail", message: "Empty menu data received." });
-  }
-  res.status(202).json({ message: "Menu push received." });
+  res.status(200).json({ message: "Menu push received." });
   void processPushedMenu(req.body);
 };
 
-/**
- * Menerima status hasil sinkronisasi menu dari Grab dan menyimpannya ke database.
- */
 export const handleMenuSyncState = async (req, res) => {
   const validationResult = menuSyncStateSchema.safeParse(req.body);
-  if (!validationResult.success) {
-    return res
-      .status(400)
-      .json({ status: "fail", errors: validationResult.error.issues });
-  }
+  if (!validationResult.success)
+    return res.status(400).json({ status: "fail" });
 
   const { jobID, partnerMerchantID, status, errors } = validationResult.data;
-
   try {
-    const { error: dbError } = await supabase.from("menu_sync_logs").insert({
+    await supabase.from("menu_sync_logs").insert({
       job_id: jobID,
       partner_merchant_id: partnerMerchantID,
       status: status,
       errors: errors || null,
     });
-
-    if (dbError) throw dbError;
-
-    console.log(
-      `[Menu Sync] Status untuk job ${jobID} (${status}) berhasil dicatat ke database.`
-    );
   } catch (dbError) {
-    console.error("[Menu Sync] Gagal menyimpan log ke database:", dbError);
+    console.error("[Menu Sync] DB Error:", dbError);
   }
-
-  res.status(202).json({ message: "Webhook received." });
+  res.status(200).json({ message: "Webhook received." });
 };
