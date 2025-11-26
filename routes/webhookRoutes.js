@@ -1,37 +1,47 @@
+// routes/webhookRoutes.js
 import express from "express";
-
-// Impor semua fungsi yang dibutuhkan dari controller dan middleware
 import {
   receiveOrderStatus,
   handleMenuSyncState,
   handleIntegrationStatus,
   handlePushMenu,
-  handleSubmitOrder, // <-- 1. Impor fungsi baru di sini
+  handleSubmitOrder,
 } from "../controllers/webhookController.js";
 
 import { verifyGrabSignature } from "../middlewares/verifyGrabSignature.js";
 
 const router = express.Router();
 
-// --- PERBAIKAN: Sebaiknya semua webhook diamankan dengan signature ---
-// Endpoint untuk menerima update status pesanan dari Grab
+/**
+ * ----------------------------------------------------------------
+ *  🔄 WEBHOOK: Submit Order (DISABLE SIGNATURE SEMENTARA)
+ * ----------------------------------------------------------------
+ *  Dipakai untuk mengetes apakah payload Grab berhasil masuk
+ *  ke backend dan masuk ke Supabase.
+ * ----------------------------------------------------------------
+ */
+router.post("/submit-order", handleSubmitOrder);
+
+/**
+ * ----------------------------------------------------------------
+ *  🟢 WEBHOOK LAIN (MASIH MENGGUNAKAN SIGNATURE)
+ * ----------------------------------------------------------------
+ */
+
+// Status pesanan (order-status webhook)
 router.post("/order-status", verifyGrabSignature, receiveOrderStatus);
 
-// Endpoint untuk menerima status sinkronisasi menu
+// Status sinkronisasi menu (menu-sync-state)
 router.post("/menu-sync-state", verifyGrabSignature, handleMenuSyncState);
 
-// Endpoint untuk menerima status integrasi toko
+// Status integrasi dengan GrabMart Partner (integration-status)
 router.post(
   "/integration-status",
   verifyGrabSignature,
   handleIntegrationStatus
 );
 
-// Endpoint untuk menerima push menu dari Grab
+// Push menu otomatis dari Grab (push-menu)
 router.post("/push-menu", verifyGrabSignature, handlePushMenu);
-
-// --- 2. Tambahkan Rute Baru untuk Menerima Pesanan ---
-// Endpoint untuk menerima pesanan baru (Submit Order Webhook)
-router.post("/submit-order", verifyGrabSignature, handleSubmitOrder);
 
 export default router;

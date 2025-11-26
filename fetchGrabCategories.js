@@ -1,102 +1,71 @@
 // fetchGrabCategories.js
-import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
-
-// 1. Setup Environment & Klien
 dotenv.config();
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
 
-// ✅ INI PERUBAHANNYA: Kita panggil mock server kita sendiri
-const MOCK_GRAB_DOMAIN = "http://localhost:8080";
-const COUNTRY_CODE = "ID"; // Tetap digunakan untuk query (meski mock server mengabaikannya)
+// --- KONFIGURASI URL ---
+// Kita coba URL Production karena kamu pakai Client ID Production
+// Dokumentasi Hal 45: GET /partner/v1/menu/categories
+const GRAB_AUTH_URL = "https://partner-api.grab.com/grabid/v1/oauth2/token";
+const GRAB_CAT_URL =
+  "https://partner-api.grab.com/grabmart-sandbox/partner/v1/menu/categories?countryCode=ID";
 
-/**
- * Fungsi untuk mengambil data kategori dari MOCK SERVER Grab
- */
-async function fetchCategories() {
-  console.log(`Mengambil kategori dari MOCK SERVER: ${MOCK_GRAB_DOMAIN}...`);
-
-  // ✅ Panggil mock server, BUKAN server Grab asli
-  // Kita tidak perlu token auth karena mock server kita tidak memerlukannya
-  const response = await fetch(
-    `${MOCK_GRAB_DOMAIN}/partner/v1/menu/categories?countryCode=${COUNTRY_CODE}`
-  );
-
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error("Gagal mengambil kategori dari MOCK SERVER.");
-  }
-
-  console.log(
-    `Berhasil mendapat ${data.categories.length} kategori utama (dari mock).`
-  );
-  return data.categories;
-}
-
-/**
- * Fungsi untuk menyimpan kategori ke Supabase (FUNGSI INI SAMA, TIDAK BERUBAH)
- */
-async function saveToSupabase(categories) {
-  console.log("Menyimpan ke Supabase...");
-
-  let allSubCategories = [];
-
-  // 1. Siapkan data kategori utama
-  const mainCategoriesData = categories.map((cat) => {
-    // 2. Sambil looping, kumpulkan semua subkategori
-    if (cat.subCategories && cat.subCategories.length > 0) {
-      const subCats = cat.subCategories.map((sub) => ({
-        id: sub.id,
-        name: sub.name,
-        category_id: cat.id, // Buat relasi ke kategori utamanya
-      }));
-      allSubCategories.push(...subCats);
-    }
-
-    return {
-      id: cat.id,
-      name: cat.name,
-    };
+const getGrabToken = async () => {
+  console.log("1. Meminta Token...");
+  const response = await fetch(GRAB_AUTH_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      // Pastikan variabel .env ini benar-benar ada isinya
+      client_id:
+        process.env.GRAB_CLIENT_ID_PRODUCTION || process.env.GRAB_CLIENT_ID,
+      client_secret:
+        process.env.GRAB_CLIENT_SECRET_PRODUCTION ||
+        process.env.GRAB_CLIENT_SECRET,
+      grant_type: "client_credentials",
+      scope: "mart.partner_api",
+    }),
   });
 
-  // 3. Simpan kategori utama ke tabel 'grab_categories'
-  console.log("Menghapus data kategori lama...");
-  await supabase.from("grab_subcategories").delete().neq("id", "dummy"); // Hapus semua subkategori
-  await supabase.from("grab_categories").delete().neq("id", "dummy"); // Hapus semua kategori utama
+  const text = await response.text();
+  console.log("   Status Token:", response.status);
 
-  console.log("Menyimpan kategori utama baru...");
-  const { error: catError } = await supabase
-    .from("grab_categories")
-    .insert(mainCategoriesData);
-
-  if (catError) throw catError;
-  console.log(
-    `Berhasil menyimpan ${mainCategoriesData.length} kategori utama.`
-  );
-
-  // 4. Simpan semua subkategori ke tabel 'grab_subcategories'
-  console.log("Menyimpan subkategori baru...");
-  const { error: subCatError } = await supabase
-    .from("grab_subcategories")
-    .insert(allSubCategories);
-
-  if (subCatError) throw subCatError;
-  console.log(`Berhasil menyimpan ${allSubCategories.length} subkategori.`);
-}
-
-// --- FUNGSI UTAMA UNTUK MENJALANKAN SKRIP ---
-async function runSync() {
-  try {
-    // ✅ Tidak perlu ambil token lagi
-    const categories = await fetchCategories();
-    await saveToSupabase(categories);
-    console.log("\n✅ Sinkronisasi Kategori Grab (dari Mock Server) Selesai!");
-  } catch (error) {
-    console.error("\n❌ GAGAL:", error.message);
+  if (!response.ok) {
+    throw new Error(`Gagal dapat token: ${text}`);
   }
-}
 
-runSync();
+  const data = JSON.parse(text);
+  return data.access_token;
+};
+
+const fetchCategories = async () => {
+  try {
+    const token = await getGrabToken();
+    console.log("   Token berhasil didapat.");
+
+    console.log("2. Mengambil Daftar Kategori ke:", GRAB_CAT_URL);
+    const response = await fetch(GRAB_CAT_URL, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    console.log("   Status Response:", response.status);
+    const text = await response.text(); // Ambil teks mentah dulu
+    console.log("   Isi Response:", text || "(KOSONG)");
+
+    if (response.ok && text) {
+      const data = JSON.parse(text);
+      console.log("\n✅ DAFTAR KATEGORI DITEMUKAN:");
+      console.log(JSON.stringify(data, null, 2));
+    } else {
+      console.log("\n❌ GAGAL MENGAMBIL KATEGORI.");
+      console.log("Coba cek apakah Token Production bisa akses URL Sandbox?");
+    }
+  } catch (error) {
+    console.error("\n❌ ERROR:", error.message);
+  }
+};
+
+fetchCategories();
