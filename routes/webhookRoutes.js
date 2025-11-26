@@ -12,36 +12,19 @@ import { verifyGrabSignature } from "../middlewares/verifyGrabSignature.js";
 
 const router = express.Router();
 
-/**
- * ----------------------------------------------------------------
- *  🔄 WEBHOOK: Submit Order (DISABLE SIGNATURE SEMENTARA)
- * ----------------------------------------------------------------
- *  Dipakai untuk mengetes apakah payload Grab berhasil masuk
- *  ke backend dan masuk ke Supabase.
- * ----------------------------------------------------------------
- */
+// --- UPDATE: Matikan verifyGrabSignature sementara untuk Order Status ---
+router.post("/order-status", receiveOrderStatus); // <--- HAPUS verifyGrabSignature
+
+// Submit order juga tanpa signature (seperti sebelumnya)
 router.post("/submit-order", handleSubmitOrder);
 
-/**
- * ----------------------------------------------------------------
- *  🟢 WEBHOOK LAIN (MASIH MENGGUNAKAN SIGNATURE)
- * ----------------------------------------------------------------
- */
-
-// Status pesanan (order-status webhook)
-router.post("/order-status", verifyGrabSignature, receiveOrderStatus);
-
-// Status sinkronisasi menu (menu-sync-state)
+// Sisanya biarkan (atau matikan juga jika perlu debugging)
 router.post("/menu-sync-state", verifyGrabSignature, handleMenuSyncState);
-
-// Status integrasi dengan GrabMart Partner (integration-status)
 router.post(
   "/integration-status",
   verifyGrabSignature,
   handleIntegrationStatus
 );
-
-// Push menu otomatis dari Grab (push-menu)
 router.post("/push-menu", verifyGrabSignature, handlePushMenu);
 
 export default router;
