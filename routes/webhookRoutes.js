@@ -15,7 +15,7 @@ const router = express.Router();
 // SEMUA WEBHOOK DIBUKA TANPA PASSWORD (SIGNATURE) SEMENTARA
 // Agar kita yakin data bisa masuk ke DB dulu
 
-router.post("/order-status", receiveOrderStatus);
+router.put("/order-status", receiveOrderStatus);
 router.post("/submit-order", handleSubmitOrder); // <--- INI PENTING
 router.post("/menu-sync-state", handleMenuSyncState);
 router.post("/integration-status", handleIntegrationStatus);
