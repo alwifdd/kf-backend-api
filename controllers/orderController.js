@@ -1,16 +1,36 @@
 // controllers/orderController.js
 import { supabase } from "../config/supabaseClient.js";
 
-// --- KONFIGURASI GRAB STAGING ---
-const GRAB_API_BASE_URL = "https://partner-api.grab.com/grabmart-sandbox";
-const GRAB_AUTH_URL = "https://partner-api.grab.com/grabid/v1/oauth2/token";
+// --- KONFIGURASI GRAB ---
+// Gunakan Env variable, fallback ke Sandbox jika tidak ada
+const GRAB_API_BASE_URL =
+  process.env.GRAB_API_URL || "https://partner-api.grab.com/grabmart-sandbox";
+const GRAB_AUTH_URL =
+  process.env.GRAB_AUTH_URL ||
+  "https://partner-api.grab.com/grabid/v1/oauth2/token";
 
 /* --------------------------------------------------------------------------
- * 🔹 FUNGSI HELPER: Ambil Token OAuth dari Grab (Otomatis)
+ * 🔹 VARIABEL CACHE TOKEN (GLOBAL SCOPE)
+ * -------------------------------------------------------------------------- */
+let cachedToken = null;
+let tokenExpiryTime = 0;
+
+/* --------------------------------------------------------------------------
+ * 🔹 FUNGSI HELPER: Ambil Token OAuth dari Grab (Dengan Caching)
  * -------------------------------------------------------------------------- */
 const getGrabToken = async () => {
+  const now = Date.now();
+
+  // 1. Cek apakah token ada di cache dan belum expired (Buffer 5 menit aman)
+  if (cachedToken && now < tokenExpiryTime - 5 * 60 * 1000) {
+    console.log("♻️ Menggunakan Token Grab dari Cache (Hemat Request)");
+    return cachedToken;
+  }
+
   try {
-    console.log("Meminta Access Token ke Grab Staging...");
+    console.log("🔄 Meminta Access Token BARU ke Grab...");
+
+    // 2. Request Token Baru
     const response = await fetch(GRAB_AUTH_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -18,7 +38,7 @@ const getGrabToken = async () => {
         client_id: process.env.GRAB_CLIENT_ID,
         client_secret: process.env.GRAB_CLIENT_SECRET,
         grant_type: "client_credentials",
-        scope: "mart.partner_api", // Scope untuk GrabMart
+        scope: "mart.partner_api", // Scope wajib untuk GrabMart
       }),
     });
 
@@ -27,16 +47,21 @@ const getGrabToken = async () => {
       throw new Error(`Gagal dapat token Grab: ${JSON.stringify(data)}`);
     }
 
-    console.log("Berhasil dapat Token Grab!");
-    return data.access_token;
+    // 3. Simpan ke Cache
+    cachedToken = data.access_token;
+    // expires_in dalam detik (biasanya 604800 detik / 7 hari), ubah ke milidetik
+    tokenExpiryTime = now + data.expires_in * 1000;
+
+    console.log("✅ Berhasil dapat Token Grab Baru!");
+    return cachedToken;
   } catch (error) {
-    console.error("Error Auth Grab:", error);
+    console.error("❌ Error Auth Grab:", error);
     throw error;
   }
 };
 
 /* --------------------------------------------------------------------------
- * 🔹 FUNGSI HELPER UNTUK KONVERSI STOK (Tidak Berubah)
+ * 🔹 FUNGSI HELPER UNTUK KONVERSI STOK
  * -------------------------------------------------------------------------- */
 const getConversionFactor = (modifierName) => {
   if (!modifierName) return 1;
@@ -223,6 +248,9 @@ export const acceptOrder = async (req, res) => {
       .select()
       .single();
 
+    // 💡 Opsional: Panggil API Accept/Reject Grab di sini jika Store manual acceptance
+    // (Tapi default toko baru biasanya Auto Acceptance)
+
     res.status(200).json(updatedOrder);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -238,6 +266,9 @@ export const rejectOrder = async (req, res) => {
       .eq("grab_order_id", orderId)
       .select()
       .single();
+
+    // 💡 Opsional: Panggil API Grab Reject di sini jika perlu
+
     res.status(200).json(updatedOrder);
   } catch (error) {
     res.status(500).json({ message: "Gagal menolak pesanan." });
@@ -245,34 +276,35 @@ export const rejectOrder = async (req, res) => {
 };
 
 /**
- * 3. SIAPKAN PESANAN (Mark Order Ready ke Grab Staging)
+ * 3. SIAPKAN PESANAN (Mark Order Ready ke Grab)
  */
 export const markOrderAsReady = async (req, res) => {
   const { orderId } = req.params;
   try {
-    console.log(`Menandai pesanan ${orderId} siap di Grab Staging...`);
+    console.log(`Menandai pesanan ${orderId} siap di Grab...`);
 
-    // 1. Dapatkan Token
+    // 1. Dapatkan Token (Sekarang menggunakan Cache!)
     const token = await getGrabToken();
 
-    // 2. Panggil API Grab Staging
+    // 2. Panggil API Grab
     const response = await fetch(
       `${GRAB_API_BASE_URL}/partner/v1/orders/mark`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`, // Pakai token asli
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           orderID: orderId,
-          markStatus: 1,
+          markStatus: 1, // 1 = Ready
         }),
       }
     );
 
     if (!response.ok) {
       const errData = await response.text();
+      // Handle jika Grab error (misal order sudah selesai/cancel di sisi Grab)
       throw new Error(`Grab API Error: ${errData}`);
     }
 
@@ -282,7 +314,7 @@ export const markOrderAsReady = async (req, res) => {
       .update({ status: "READY_FOR_PICKUP" })
       .eq("grab_order_id", orderId);
 
-    console.log(`Pesanan ${orderId} berhasil ditandai siap di Grab & DB.`);
+    console.log(`Pesanan ${orderId} berhasil ditandai siap.`);
     res.status(200).json({ message: `Order ${orderId} marked as ready.` });
   } catch (error) {
     console.error("Gagal menandai pesanan:", error);
@@ -291,7 +323,7 @@ export const markOrderAsReady = async (req, res) => {
 };
 
 /**
- * 4. CEK PEMBATALAN (Ke Grab Staging)
+ * 4. CEK PEMBATALAN (Ke Grab)
  */
 export const checkCancellationEligibility = async (req, res) => {
   const { orderId } = req.params;
@@ -308,9 +340,8 @@ export const checkCancellationEligibility = async (req, res) => {
     );
 
     if (!response.ok) {
-      // Jika order dummy (tidak ada di grab), return dummy true agar tidak error di UI
-      console.log(
-        "Order tidak ditemukan di Grab (mungkin order tes), return dummy true."
+      console.warn(
+        "Order tidak ditemukan di Grab, return dummy true untuk testing."
       );
       return res.status(200).json({ cancelAble: true, cancelReasons: [] });
     }
@@ -324,7 +355,7 @@ export const checkCancellationEligibility = async (req, res) => {
 };
 
 /**
- * 5. BATALKAN PESANAN (Ke Grab Staging)
+ * 5. BATALKAN PESANAN (Ke Grab)
  */
 export const cancelOrder = async (req, res) => {
   const { orderId } = req.params;
@@ -334,13 +365,14 @@ export const cancelOrder = async (req, res) => {
     return res.status(400).json({ message: "cancelCode required." });
 
   try {
-    console.log(`Membatalkan pesanan ${orderId} di Grab Staging...`);
+    console.log(`Membatalkan pesanan ${orderId} di Grab...`);
 
     const token = await getGrabToken();
 
-    // 1. Panggil API Grab
-    // (Kita gunakan ID Merchant dummy/default karena di body request butuh merchantID)
-    const merchantID = "grabfood-merchant-id";
+    // Pastikan merchantID dikirim sesuai dokumentasi Grab
+    // Idealnya ambil dari database orders -> branch -> grab_merchant_id
+    // Disini kita gunakan dummy atau parameter jika ada
+    const merchantID = req.body.merchantID || "grabfood-merchant-id";
 
     const response = await fetch(
       `${GRAB_API_BASE_URL}/partner/v1/order/cancel`,
@@ -358,14 +390,11 @@ export const cancelOrder = async (req, res) => {
       }
     );
 
-    // Kalau gagal batalkan di Grab (misal karena order tes lokal), kita log aja tapi lanjut restock
     if (!response.ok) {
-      console.warn(
-        "Gagal cancel di Grab (mungkin order tes), lanjut restock lokal."
-      );
+      console.warn("Gagal cancel di Grab, lanjut restock lokal.");
     }
 
-    // 2. Restock Stok
+    // 2. Restock Stok (Kembalikan stok)
     const { data: orderData } = await supabase
       .from("orders")
       .select("id, branch_id, grab_payload_raw")

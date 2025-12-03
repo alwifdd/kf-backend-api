@@ -7,7 +7,7 @@ export const getMartMenu = async (req, res) => {
   console.log(`[Menu] Request masuk. PartnerID: ${partnerMerchantID}`);
 
   try {
-    // 1. Cari Branch ID Internal (Misal: KFA_FINAL -> 40003)
+    // 1. Cari Branch ID Internal
     const { data: branch } = await supabase
       .from("branches")
       .select("branch_id, branch_name")
@@ -57,7 +57,7 @@ export const getMartMenu = async (req, res) => {
         serviceHours: st.service_hours,
       }));
     } else {
-      // Default 24 Jam
+      // Default 24 Jam jika belum diset
       finalSellingTimes = [
         {
           id: "ST-DEFAULT",
@@ -75,9 +75,10 @@ export const getMartMenu = async (req, res) => {
       ];
     }
 
-    const sectionSellingTimeID = finalSellingTimes[0].id;
+    // Ambil ID selling time pertama sebagai default untuk item
+    const defaultSellingTimeID = finalSellingTimes[0].id;
 
-    // B. FIX ITEMS MAPPING (HARGA * 100)
+    // B. FIX ITEMS MAPPING
     let items = [];
     if (productsData && productsData.length > 0) {
       items = productsData.map((p) => ({
@@ -85,84 +86,87 @@ export const getMartMenu = async (req, res) => {
         name: p.products.product_name || "Item Tanpa Nama",
         description: p.products.description || "Deskripsi obat",
 
-        // 👇👇 PERBAIKAN UTAMA DI SINI 👇👇
-        // Harga DB dikali 100 agar Grab membacanya sebagai Rupiah penuh
+        // ⚠️ HARGA MINOR UNIT (IDR Exponent 2 -> Harga x 100)
         price: Math.floor((Number(p.products.price) || 0) * 100),
 
         availableStatus: p.opname_stock > 0 ? "AVAILABLE" : "UNAVAILABLE",
         maxStock: Math.floor(Number(p.opname_stock) || 0),
-        photos: [],
+        photos: [], // Isi URL foto jika ada di DB
 
-        // Default Kategori Resmi Grab
+        // Default Kategori Resmi Grab (Fallback ID)
+        // Sebaiknya pastikan grab_category_id di DB sudah terisi ID valid dari Grab
         _cat: p.products.grab_category_id || "IDITEDP20220629083236010281",
         _sub: p.products.grab_subcategory_id || "IDITEDP20220701092521017633",
 
-        sellingTimeID: sectionSellingTimeID,
+        sellingTimeID: defaultSellingTimeID,
       }));
     } else {
-      // DUMMY ITEM
+      // DUMMY ITEM (Jika inventory kosong)
       items = [
         {
           id: "DUMMY-01",
-          name: "Paracetamol (Stok Habis)",
-          description: "Item dummy",
-          price: 500000, // Rp 5.000 (5000 * 100)
+          name: "Paracetamol (Contoh)",
+          description: "Item contoh untuk testing integrasi",
+          price: 500000, // Rp 5.000
           availableStatus: "AVAILABLE",
           maxStock: 100,
           photos: [],
           _cat: "IDITEDP20220629083236010281",
           _sub: "IDITEDP20220701092521017633",
-          sellingTimeID: sectionSellingTimeID,
+          sellingTimeID: defaultSellingTimeID,
         },
       ];
     }
 
-    // C. GROUPING CATEGORIES
+    // C. GROUPING CATEGORIES & SUBCATEGORIES
     const categoriesMap = items.reduce((acc, item) => {
       const catId = item._cat;
       const subId = item._sub;
 
-      if (!acc[catId])
-        acc[catId] = { id: catId, name: catId, subCategoriesMap: {} };
-      if (!acc[catId].subCategoriesMap[subId])
+      // Inisialisasi Kategori jika belum ada
+      if (!acc[catId]) {
+        acc[catId] = {
+          id: catId,
+          name: "Category Name (Update DB)", // Sebaiknya ambil nama kategori dari tabel master
+          subCategoriesMap: {},
+        };
+      }
+
+      // Inisialisasi Subkategori jika belum ada
+      if (!acc[catId].subCategoriesMap[subId]) {
         acc[catId].subCategoriesMap[subId] = {
           id: subId,
-          name: subId,
+          name: "Subcategory Name (Update DB)", // Sebaiknya ambil nama subkategori dari tabel master
           items: [],
         };
+      }
 
+      // Bersihkan properti helper (_cat, _sub) sebelum push ke items
       const { _cat, _sub, ...cleanItem } = item;
       acc[catId].subCategoriesMap[subId].items.push(cleanItem);
+
       return acc;
     }, {});
 
+    // Transform Map ke Array sesuai struktur Grab
     const categories = Object.values(categoriesMap).map((cat) => ({
       id: cat.id,
-      name: cat.name,
+      name: cat.name, // Nama kategori (bisa disesuaikan jika ada mapping nama)
       subCategories: Object.values(cat.subCategoriesMap).map((sub) => ({
         id: sub.id,
-        name: sub.name,
+        name: sub.name, // Nama subkategori
         items: sub.items,
       })),
     }));
 
-    // --- STEP FINAL: BUNGKUS KE SECTIONS ---
-    const sections = [
-      {
-        id: "SEC-MAIN",
-        name: branchName,
-        serviceHours: { id: sectionSellingTimeID },
-        categories: categories,
-      },
-    ];
-
-    // --- FINAL RESPONSE ---
+    // --- FINAL RESPONSE (Format Baru: Item Selling Time Menu) ---
+    // Struktur 'sections' sudah dihapus karena deprecated.
     const finalPayload = {
       merchantID,
       partnerMerchantID,
       currency: { code: "IDR", symbol: "Rp", exponent: 2 },
       sellingTimes: finalSellingTimes,
-      sections: sections,
+      categories: categories, // <-- Langsung di root object
     };
 
     res.status(200).json(finalPayload);
@@ -172,5 +176,6 @@ export const getMartMenu = async (req, res) => {
   }
 };
 
+// Placeholder fungsi update (belum diimplementasikan penuh)
 export const updateSingleItem = async (req, res) => res.status(200).json({});
 export const batchUpdateItems = async (req, res) => res.status(200).json({});
