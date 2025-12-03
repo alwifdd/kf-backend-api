@@ -87,7 +87,7 @@ export const getMartMenu = async (req, res) => {
         description: p.products.description || "Deskripsi obat",
 
         // ⚠️ HARGA MINOR UNIT (IDR Exponent 2 -> Harga x 100)
-        price: Math.floor((Number(p.products.price) || 0) * 100),
+        price: Math.floor(Number(p.products.price) || 0),
 
         availableStatus: p.opname_stock > 0 ? "AVAILABLE" : "UNAVAILABLE",
         maxStock: Math.floor(Number(p.opname_stock) || 0),
